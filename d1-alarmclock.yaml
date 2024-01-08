@@ -1,0 +1,195 @@
+esphome:
+  name: $devicename
+
+substitutions:
+  devicename: "d1-alarmclock"
+
+esp8266:
+  board: d1_mini
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+    on_time:
+      seconds: 0
+      minutes: "*"
+      then:
+        script.execute: check_alarm
+
+display:
+  platform: tm1637
+  id: tm1637_display
+  clk_pin: D3
+  dio_pin: D4
+  length: 4
+  intensity: 0
+  update_interval: 500ms
+  lambda: |-
+      static bool loop = true;
+      char buffer[6];
+      char format[6] = "%I.%M";
+
+      loop = !loop;
+      if (loop)
+        strcpy(format, "%I%M");
+
+      id(homeassistant_time).now().strftime(buffer, sizeof(buffer), format);
+
+      if (buffer[0] == '0')
+        buffer[0] = ' ';
+
+      it.print(buffer);
+
+output:
+  - platform: esp8266_pwm
+    pin: D2
+    id: rtttl_out
+
+rtttl:
+  output: rtttl_out
+
+globals:
+  - id: alarm_start_at
+    type: time_t
+
+script:
+  - id: check_alarm
+    then:
+      lambda: |-
+        if (!id(alarm_active).state) return;
+
+        auto now = id(homeassistant_time).now();
+        if (!now.is_valid()) return;
+
+        auto alarm = now.to_c_tm();
+        alarm.tm_hour = (int) id(alarm_hh).state;
+        alarm.tm_min = (int) id(alarm_mm).state;
+        alarm.tm_sec = 0;
+        time_t alarm_time = mktime(&alarm);
+
+        auto time = now.to_c_tm();
+        time_t now_time = mktime(&time);
+
+        if (difftime(now_time, alarm_time) == 0)
+          id(loop_alarm).execute();
+
+  - id: stop_alarm
+    then: 
+      - script.stop: loop_alarm
+      - script.stop: start_snooze
+
+  - id: loop_alarm
+    then:
+      - globals.set:
+          id: alarm_start_at
+          value: !lambda "return id(homeassistant_time).now().timestamp;"
+      - while:
+          condition:
+            lambda: |-
+              return id(homeassistant_time).now().timestamp < (id(alarm_start_at) + (id(alarm_duration).state * 60));
+          then:
+            - rtttl.play: "BeepBeep:d=1,o=5,b=100:16e6,16e6"
+            - delay: 700ms
+
+  - id: start_snooze
+    then:
+      if:
+        condition:
+          script.is_running: loop_alarm
+        then:
+          - script.stop: loop_alarm
+          - delay: !lambda "return id(snooze_duration).state * 60 * 1000;"
+          - script.execute: loop_alarm
+
+number:
+  - platform: template
+    id: alarm_duration
+    name: "${devicename} Alarm duration in minutes"
+    mode: box
+    initial_value: 5
+    min_value: 0.1
+    max_value: 60
+    step: 1
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    id: snooze_duration
+    name: "${devicename} Snooze Time in minutes"
+    mode: box
+    initial_value: 9
+    min_value: 1
+    max_value: 30
+    step: 1
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    id: alarm_hh
+    name: "${devicename} Alarm Hour"
+    mode: box
+    min_value: 0
+    max_value: 23
+    step: 1
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    id: alarm_mm
+    name: "${devicename} Alarm Minute"
+    mode: box
+    min_value: 0
+    max_value: 59
+    step: 5
+    optimistic: true
+    restore_value: true
+
+  - platform: template
+    id: display_intensity
+    name: "${devicename} Display Brightness"
+    initial_value: 0
+    min_value: 0
+    max_value: 7
+    step: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            id(tm1637_display).set_intensity(x);
+
+button:
+  - platform: template
+    name: "${devicename} Snooze"
+    icon: "mdi:alarm-snooze"
+    on_press:
+      script.execute: start_snooze
+
+  - platform: template
+    name: "${devicename} Start Alarm"
+    icon: "mdi:alarm-note"
+    on_press:
+      script.execute: loop_alarm
+
+  - platform: template
+    name: "${devicename} Stop Alarm"
+    icon: "mdi:alarm-note-off"
+    on_press:
+      script.execute: stop_alarm
+
+switch:
+  - platform: template
+    id: alarm_active
+    entity_category: ""
+    name: "${devicename} Alarm Active"
+    icon: "mdi:alarm-check"
+    optimistic: true

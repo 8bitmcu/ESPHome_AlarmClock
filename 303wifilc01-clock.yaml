@@ -1,0 +1,65 @@
+esphome:
+  name: $devicename
+
+  includes:
+    - tm1650_303wifilc01.h
+  libraries:
+    - "Wire"
+
+substitutions:
+  devicename: "303wifilc01-clock"
+
+esp8266:
+  board: esp01_1m
+
+logger:
+  level: DEBUG
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+api:
+
+time:
+  - platform: homeassistant
+    id: homeassistant_time
+
+custom_component:
+  - lambda: |-
+      auto tm1650 = new tm1650_component();
+      App.register_component(tm1650);
+      return {tm1650};
+    components:
+      - id: tm1650
+
+interval:
+  - interval: 500ms
+    then:
+      - lambda: |-
+          static bool loop = true;
+          char buffer[6];
+
+          id(homeassistant_time).now().strftime(buffer, sizeof(buffer), "%I%M");
+
+          if(buffer[0] == '0')
+            buffer[0] = ' ';
+
+          ((tm1650_component*) id(tm1650))->update(buffer, loop);
+
+          loop = !loop;
+
+number:
+  - platform: template
+    id: display_intensity
+    name: "${devicename} Display Brightness"
+    initial_value: 4
+    min_value: 1
+    max_value: 8
+    step: 1
+    optimistic: true
+    restore_value: true
+    on_value:
+      then:
+        - lambda: |-
+            ((tm1650_component*) id(tm1650))->set_intensity(x);
